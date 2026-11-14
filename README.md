@@ -1,8 +1,6 @@
 # aws-emulator-node
 
-Unofficial [AWS Emulator](https://github.com/aws/aws-emulator) for Node.js.
-
----
+> Unofficial [AWS Emulator](https://github.com/aws/aws-emulator) for Node.js.
 
 [AWS Emulator](https://github.com/aws/aws-emulator) **embedded mode**, built into a Node.js native 
 addons with [napi-rs](https://napi.rs). The emulator runs inside Node.js process.
@@ -51,12 +49,10 @@ package throws an error with these same steps. Allow the script, then re-run it:
 
 | OS | x64 | arm64 |
 |---|---|---|
-| macOS | | `darwin-arm64` |
+| macOS | Not Supported| `darwin-arm64` |
 | Linux (glibc 2.17+) | `linux-x64-gnu` | `linux-arm64-gnu` |
 | Linux (musl, e.g. Alpine) | `linux-x64-musl` | `linux-arm64-musl` |
-| Windows | `win32-x64-msvc` | `win32-arm64-msvc` |
-
-Intel macOS is not supported.
+| Windows | Not Supported | Not Supported |
 
 ### GitHub Actions
 

@@ -25,8 +25,6 @@ export function platformTriple(
       return `darwin-${arch}`;
     case 'linux':
       return `linux-${arch}-${isMusl() ? 'musl' : 'gnu'}`;
-    case 'win32':
-      return `win32-${arch}-msvc`;
     default:
       return `${platform}-${arch}`;
   }
