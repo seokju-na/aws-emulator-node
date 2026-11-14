@@ -59,10 +59,11 @@ jobs:
         run: yarn build:native --target ${{ matrix.target }} ${{ matrix.flags }}
         env:
           # The --use-napi-cross toolchain (glibc 2.17) ships an old GCC. It defaults to gnu89, which
-          # QuickJS (rquickjs-sys) does not compile under, and on aarch64 it does not define
-          # __ARM_ARCH, which ring's assembly requires.
-          CFLAGS_x86_64_unknown_linux_gnu: -std=gnu11
-          CFLAGS_aarch64_unknown_linux_gnu: -std=gnu11 -D__ARM_ARCH=8
+          # QuickJS (rquickjs-sys) does not compile under. gnu99, not gnu11: under gnu11 aws-lc
+          # includes <stdatomic.h>, which this GCC does not have. On aarch64 it also does not
+          # define __ARM_ARCH, which ring's assembly requires.
+          CFLAGS_x86_64_unknown_linux_gnu: -std=gnu99
+          CFLAGS_aarch64_unknown_linux_gnu: -std=gnu99 -D__ARM_ARCH=8
       - run: yarn build:js
       - name: Test
         if: ${{ !matrix.alpine }}
