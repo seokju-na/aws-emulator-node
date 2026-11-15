@@ -22,5 +22,3 @@ jobs:
           SEOKJU_NA_AWS_EMULATOR_NODE_SKIP_DOWNLOAD: '1'
       - run: yarn lint
       - run: yarn typecheck
-  build:
-    uses: ./.github/workflows/build.yaml

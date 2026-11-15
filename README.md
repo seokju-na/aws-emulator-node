@@ -50,25 +50,8 @@ package throws an error with these same steps. Allow the script, then re-run it:
 | OS | x64 | arm64 |
 |---|---|---|
 | macOS | Not Supported| `darwin-arm64` |
-| Linux (glibc 2.17+) | `linux-x64-gnu` | `linux-arm64-gnu` |
-| Linux (musl, e.g. Alpine) | `linux-x64-musl` | `linux-arm64-musl` |
-| Windows | Not Supported | Not Supported |
 
-### GitHub Actions
-
-Every job downloads the ~1GB binding again unless it is cached. Cache the binding directory:
-
-```yaml
-- uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-  with:
-    path: ~/.aws/emulator-node
-    key: aws-emulator-node-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock') }}
-- run: npm ci
-```
-
-The key changes with the lockfile, so a new package version is downloaded once and then
-reused. On a cache hit, `postinstall` finds the binding and skips the download.
-
+Currently, only supports macOS `darwin-arm64` architecture.
 
 ## Upstream
 

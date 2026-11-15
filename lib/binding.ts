@@ -20,19 +20,10 @@ export function platformTriple(
   platform: NodeJS.Platform = process.platform,
   arch: NodeJS.Architecture = process.arch,
 ): string {
-  switch (platform) {
-    case 'darwin':
-      return `darwin-${arch}`;
-    case 'linux':
-      return `linux-${arch}-${isMusl() ? 'musl' : 'gnu'}`;
-    default:
-      return `${platform}-${arch}`;
+  if (platform === 'darwin' && arch === 'arm64') {
+    return `${platform}-${arch}`;
   }
-}
-
-function isMusl(): boolean {
-  const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } };
-  return !report?.header?.glibcVersionRuntime;
+  throw new Error(`Not supported platform: ${platform}-${arch}`);
 }
 
 export function bindingFileName(triple: string = platformTriple()): string {
