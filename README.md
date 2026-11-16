@@ -59,11 +59,36 @@ The native binding is built from [aws/aws-emulator](https://github.com/aws/aws-e
 **v1.0.353** (commit `ca8a89de`), checked out as a git submodule at `vendor/aws-emulator`.
 The submodule stays at that upstream commit.
 
+### CloudFront functions with KVS
+
+The KVS patch requires a locally rebuilt native binding; the published v0.1.0 binary does not include it:
+
+```sh
+mise exec -- corepack yarn install --immutable
+mise exec -- corepack yarn build:native:debug
+```
+
+Rust/Cargo and a native C toolchain must be available on `PATH` for the build.
+Create a local store with `CreateKeyValueStore`, write its keys through the
+`CloudFrontKeyValueStoreClient`, and associate its ARN with the function's
+`KeyValueStoreAssociations`. `TestFunction` can then execute the original
+`import cf from 'cloudfront'` and read the associated store.
+Load `@aws-sdk/signature-v4a` with a side-effect import before using the KVS SDK
+client, which requires SigV4a signing.
+
+Each invocation reads a snapshot of the local KVS. Updates are visible on the next
+invocation; real AWS KVS data is not imported automatically. Only `cf.kvs()` and
+`cf.kvs(id)` with `exists()` and `get()` (default/string/JSON) are supported by this
+patch. Other CloudFront helpers, `meta()`, and byte-format reads are not implemented.
+The patch covers `TestFunction`, not distribution-triggered function execution.
+Other module imports remain unavailable, and the existing execution limits remain in place.
+
 ### Patches
 
 | Patch | Change | Reason |
 |---|---|---|
 | `0001-lambda-getrusage-non-linux.patch` | On non-Linux targets, the Lambda Python runtime counts page faults with `getrusage(RUSAGE_SELF)` instead of `RUSAGE_THREAD`. | `RUSAGE_THREAD` exists only on Linux, so upstream does not compile on macOS. On macOS the count covers the whole process, so the runtime's memory limit is less precise. |
+| `0002-cloudfront-function-kvs.patch` | Runs CloudFront functions as JavaScript modules and provides `cloudfront` with `cf.kvs()`, `exists()`, and `get()` (string/JSON). | Upstream's `TestFunction` runtime has no module loader or connection to the local KVS data plane. |
 
 ## License
 

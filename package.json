@@ -58,6 +58,7 @@
   "devDependencies": {
     "@arethetypeswrong/core": "0.18.5",
     "@aws-sdk/client-cloudfront": "^3.1168.0",
+    "@aws-sdk/client-cloudfront-keyvaluestore": "^3.1168.0",
     "@aws-sdk/client-cloudtrail": "^3.1168.0",
     "@aws-sdk/client-cloudwatch-logs": "^3.1168.0",
     "@aws-sdk/client-dynamodb": "^3.1168.0",
@@ -74,6 +75,7 @@
     "@aws-sdk/client-sqs": "^3.1168.0",
     "@aws-sdk/client-ssm": "^3.1168.0",
     "@aws-sdk/client-sts": "^3.1168.0",
+    "@aws-sdk/signature-v4a": "^3.1138.0",
     "@biomejs/biome": "2.6.7",
     "@napi-rs/cli": "3.10.12",
     "@napi-rs/cross-toolchain": "1.0.5",

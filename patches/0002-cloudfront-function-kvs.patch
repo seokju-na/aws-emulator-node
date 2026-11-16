@@ -1,0 +1,331 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 4203ab9da..ab9d9dc24 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -10871,6 +10871,7 @@ dependencies = [
+  "rcgen",
+  "rquickjs",
+  "serde_json",
++ "service-com-amazonaws-cloudfrontkeyvaluestore-cloudfrontkeyvaluestore",
+  "service-com-amazonaws-cloudwatch-graniteserviceversion20100801",
+  "service-com-amazonaws-iam-awsidentitymanagementv20100508",
+  "service-com-amazonaws-kinesis-kinesis-20131202",
+diff --git a/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/Cargo.toml b/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/Cargo.toml
+index 3a6794a33..490b9edd0 100644
+--- a/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/Cargo.toml
++++ b/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/Cargo.toml
+@@ -68,14 +68,14 @@ percent-encoding = "2"
+ # ceilings, a wall-clock and a step budget spent by its interrupt handler, a latch the running
+ # code cannot reach, caps on what one run may report, a concurrency permit and a caller-wait
+ # ceiling, the run on a blocking thread, and ONE host function reachable from the engine (the
+-# console's writer). The `loader` feature is left OUT, so no module resolver is built at all
+-# and an `import` reaches nothing; `dyn-load` is left out too, so no host library can be
+-# loaded. QuickJS itself registers no filesystem, process, environment, network or thread API.
++# console's writer). The loader only resolves the built-in `cloudfront` module.
++# `dyn-load` is left out, so no host library can be loaded. QuickJS itself registers no filesystem, process, environment, network or thread API.
+ # It is also a NATIVE component: `rquickjs-sys` compiles the QuickJS C sources with `cc` inside
+ # this build, so nothing is fetched or started outside this process, and the C it compiles is
+ # the engine's own. 0.14 is the version this workspace's other services already run it at, and
+ # it carries no advisory.
+-rquickjs = "0.14"
++rquickjs = { version = "0.14", features = ["loader"] }
++service-com-amazonaws-cloudfrontkeyvaluestore-cloudfrontkeyvaluestore = { workspace = true }
+ # The account's S3 OBJECT a trust store's CA certificates bundle is: `CreateTrustStore`
+ # reads the bundle in the one object store this emulator holds, over the in-process
+ # callback, so the certificate count it reports comes from those bytes
+diff --git a/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/src/ops/test_function.rs b/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/src/ops/test_function.rs
+index 36fe5862b..0466a582f 100644
+--- a/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/src/ops/test_function.rs
++++ b/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/src/ops/test_function.rs
+@@ -247,7 +247,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
+ 
+         // The run itself: the code the store holds, over that event object, under every bound
+         // the runtime module declares, on a blocking thread.
+-        let run = crate::state::run_function(code, event).await;
++        let kvs = if let Some(association) = function_summary
++            .function_config
++            .key_value_store_associations
++            .as_ref()
++            .and_then(|associations| associations.items.as_ref())
++            .and_then(|items| items.first())
++        {
++            let arn = &association.key_value_store_arn;
++            let data = service_com_amazonaws_cloudfrontkeyvaluestore_cloudfrontkeyvaluestore::state::service_state(&*self.engine)
++                .ok_or_else(crate::state::store_unavailable)?;
++            let store = data.lock();
++            let keys = store
++                .store(arn)
++                .ok()
++                .flatten()
++                .map(|store| store.keys.clone())
++                .unwrap_or_default();
++            Some(::serde_json::json!({
++                "id": arn.rsplit('/').next().unwrap_or(arn),
++                "keys": keys,
++            }))
++        } else {
++            None
++        };
++        let run = crate::state::run_function(code, event, kvs).await;
+         let compute_utilization = run.compute_utilization();
+ 
+         // One record per invocation: which function and stage ran and what the run came to.
+@@ -276,10 +300,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
+                     detail = %reason,
+                     "a CloudFront function was not run, so its test could not be answered",
+                 );
+-                return Err(TestFunctionErrorModeled::TestFunctionFailed(TestFunctionFailed {
+-                    message: Some(TEST_FUNCTION_FAILED_MESSAGE.to_string()),
+-                })
+-                .into());
++                return Err(
++                    TestFunctionErrorModeled::TestFunctionFailed(TestFunctionFailed {
++                        message: Some(TEST_FUNCTION_FAILED_MESSAGE.to_string()),
++                    })
++                    .into(),
++                );
+             }
+         };
+ 
+diff --git a/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/src/state/function_runtime.rs b/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/src/state/function_runtime.rs
+index 679918ac2..8061e9386 100644
+--- a/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/src/state/function_runtime.rs
++++ b/services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/src/state/function_runtime.rs
+@@ -17,8 +17,9 @@
+ //! no value outlives the call that made it. Inside that engine the code reaches the language
+ //! and ONE host function — the log writer the console is built over, which only appends to
+ //! this run's own captured lines and is deleted from the global object before any of the
+-//! caller's code is compiled, so only the console closure still holds it. No module loader
+-//! is installed, so an `import` resolves to nothing; plain QuickJS registers no filesystem,
++//! caller's code is compiled, so only the console closure still holds it. Only the built-in
++//! `cloudfront` module can be imported, backed by a read-only snapshot of the associated
++//! local KVS; plain QuickJS registers no filesystem,
+ //! process, environment, network, host-library or thread API, and nothing here adds one.
+ //!
+ //! # What bounds it
+@@ -52,7 +53,7 @@ use std::sync::{Arc, Mutex, PoisonError};
+ use std::time::{Duration, Instant};
+ 
+ use ::rquickjs::function::Func;
+-use ::rquickjs::{CatchResultExt, Context, Ctx, Function, Runtime, Value};
++use ::rquickjs::{CatchResultExt, Context, Ctx, Function, Module, Runtime, Value};
+ use ::serde_json::Value as Json;
+ 
+ /// The global a CloudFront function's code declares and CloudFront calls: "the function code
+@@ -151,9 +152,7 @@ const RUN_PERMIT_WAIT: Duration = Duration::from_secs(5);
+ fn function_runs() -> &'static ::std::sync::Arc<::tokio::sync::Semaphore> {
+     static RUNS: ::std::sync::OnceLock<::std::sync::Arc<::tokio::sync::Semaphore>> =
+         ::std::sync::OnceLock::new();
+-    RUNS.get_or_init(|| {
+-        ::std::sync::Arc::new(::tokio::sync::Semaphore::new(MAX_CONCURRENT_RUNS))
+-    })
++    RUNS.get_or_init(|| ::std::sync::Arc::new(::tokio::sync::Semaphore::new(MAX_CONCURRENT_RUNS)))
+ }
+ 
+ /// What one run of a function came to.
+@@ -227,7 +226,7 @@ impl FunctionRun {
+ /// slot comes back only when the engine thread ends, so [`MAX_CONCURRENT_RUNS`] bounds the
+ /// engines that exist whatever a caller does; a caller that finds every slot still taken is
+ /// answered as a run that did not happen.
+-pub async fn run_function(code: Vec<u8>, event: String) -> FunctionRun {
++pub async fn run_function(code: Vec<u8>, event: String, kvs: Option<Json>) -> FunctionRun {
+     let waited = ::tokio::time::timeout(
+         RUN_PERMIT_WAIT,
+         ::std::sync::Arc::clone(function_runs()).acquire_owned(),
+@@ -246,7 +245,7 @@ pub async fn run_function(code: Vec<u8>, event: String) -> FunctionRun {
+     let running = ::tokio::task::spawn_blocking(move || {
+         // The slot is released where the RUN ends, on every path out of it.
+         let _slot = permit;
+-        run(code, &event)
++        run(code, &event, kvs)
+     });
+     match ::tokio::time::timeout(CALLER_WAIT_CEILING, running).await {
+         Ok(Ok(run)) => run,
+@@ -261,7 +260,7 @@ pub async fn run_function(code: Vec<u8>, event: String) -> FunctionRun {
+ }
+ 
+ /// Run `code` over `event` on THIS thread, under every bound this module declares.
+-fn run(code: Vec<u8>, event: &str) -> FunctionRun {
++fn run(code: Vec<u8>, event: &str, kvs: Option<Json>) -> FunctionRun {
+     let collected = Arc::new(Mutex::new(Collected::default()));
+     // The code is a blob on the wire, so it may be bytes no engine can read at all. That is
+     // a property of the code rather than of this emulator, so it is the function failing.
+@@ -278,6 +277,17 @@ fn run(code: Vec<u8>, event: &str) -> FunctionRun {
+             return FunctionRun::unavailable(format!("the engine did not start: {error}"))
+         }
+     };
++    runtime.set_loader(
++        ::rquickjs::loader::BuiltinResolver::default().with_module("cloudfront"),
++        ::rquickjs::loader::BuiltinLoader::default().with_module(
++            "cloudfront",
++            format!(
++                "const snapshot = JSON.parse({});\n{}",
++                Json::String(kvs.unwrap_or(Json::Null).to_string()),
++                CLOUDFRONT_MODULE
++            ),
++        ),
++    );
+     runtime.set_memory_limit(RUN_MEMORY_BYTES);
+     runtime.set_max_stack_size(RUN_STACK_BYTES);
+     let bounds = Arc::new(Bounds::new());
+@@ -294,7 +304,7 @@ fn run(code: Vec<u8>, event: &str) -> FunctionRun {
+ 
+     let answer: Arc<Mutex<Option<Answered>>> = Arc::new(Mutex::new(None));
+     let (invoked, mut elapsed) =
+-        context.with(|ctx| invoke(&ctx, &source, event, &collected, &answer));
++        context.with(|ctx| invoke(&ctx, &source, event, &collected, &answer, &bounds));
+     // A handler that returned a promise has not answered yet: its jobs are what settle it,
+     // and nothing else of this run drives them.
+     if matches!(invoked, Invoked::Pending) {
+@@ -374,6 +384,7 @@ fn invoke(
+     event: &str,
+     collected: &Arc<Mutex<Collected>>,
+     answer: &Arc<Mutex<Option<Answered>>>,
++    bounds: &Bounds,
+ ) -> (Invoked, Duration) {
+     if let Err(reason) = install_console(ctx, collected) {
+         return (Invoked::Unavailable(reason), Duration::ZERO);
+@@ -406,10 +417,37 @@ fn invoke(
+ 
+     // From here on the clock is the FUNCTION's: its compile, and the call of its handler.
+     let started = Instant::now();
+-    if let Err(caught) = ctx.eval::<Value<'_>, _>(source).catch(ctx) {
+-        return (Invoked::Failed(raised_message(&caught)), started.elapsed());
++    // Module evaluation supports static imports without rewriting the caller's source.
++    // Export the CloudFront entry point explicitly: module bindings are not globals.
++    let module_source =
++        format!("{source}\n;export default typeof handler === 'function' ? handler : undefined;\n");
++    let evaluated = Module::declare(ctx.clone(), "function", module_source)
++        .and_then(|module| module.eval())
++        .catch(ctx);
++    let (module, promise) = match evaluated {
++        Ok(value) => value,
++        Err(caught) => return (Invoked::Failed(raised_message(&caught)), started.elapsed()),
++    };
++    for _ in 0..MAX_PENDING_JOBS {
++        if bounds.stop_if_due() {
++            return (Invoked::Failed(UNSETTLED.to_string()), started.elapsed());
++        }
++        if promise.state() != ::rquickjs::promise::PromiseState::Pending {
++            break;
++        }
++        if !ctx.execute_pending_job() {
++            break;
++        }
++    }
++    match promise.result::<()>() {
++        Some(result) => {
++            if let Err(caught) = result.catch(ctx) {
++                return (Invoked::Failed(raised_message(&caught)), started.elapsed());
++            }
++        }
++        None => return (Invoked::Failed(UNSETTLED.to_string()), started.elapsed()),
+     }
+-    let Ok(handler) = ctx.globals().get::<_, Function<'_>>(HANDLER_NAME) else {
++    let Ok(handler) = module.get::<_, Function<'_>>("default") else {
+         return (Invoked::Failed(NO_HANDLER.to_string()), started.elapsed());
+     };
+     let latched = Arc::clone(answer);
+@@ -786,3 +824,102 @@ mod tests {
+         );
+     }
+ }
++
++// A per-invocation snapshot: no host credentials, filesystem or network are exposed.
++const CLOUDFRONT_MODULE: &str = r#"
++export default Object.freeze({
++    kvs(id) {
++        if (snapshot === null) {
++            throw new Error('Function is not associated with a KeyValueStore');
++        }
++        if (id !== undefined && id !== snapshot.id) {
++            throw new Error('KeyValueStore is not associated with this function');
++        }
++        const keys = snapshot.keys;
++        const has = key => Object.prototype.hasOwnProperty.call(keys, key);
++        return Object.freeze({
++            async exists(key) {
++                return has(key);
++            },
++            async get(key, options = {}) {
++                if (!has(key)) {
++                    throw new Error('KeyValueStore key not found: ' + key);
++                }
++                const format = options.format === undefined ? 'string' : options.format;
++                if (format === 'string') {
++                    return keys[key];
++                }
++                if (format === 'json') {
++                    return JSON.parse(keys[key]);
++                }
++                throw new Error('Unsupported KeyValueStore format: ' + format);
++            }
++        });
++    }
++});
++"#;
++
++#[cfg(test)]
++mod cloudfront_module_tests {
++    use super::*;
++
++    const EVENT: &str = r#"{"request":{"uri":"/index.js"}}"#;
++
++    #[test]
++    fn reads_associated_store_without_exposing_other_modules() {
++        let code = br#"
++            import cf from 'cloudfront';
++            const kvs = cf.kvs('store-id');
++            async function handler(event) {
++                console.log(await kvs.exists('missing'));
++                const config = await kvs.get('config', { format: 'json' });
++                event.request.uri = '/' + config.version + '/' + await kvs.get('file');
++                return event.request;
++            }
++        "#;
++        let snapshot = ::serde_json::json!({"id":"store-id", "keys":{
++            "config":"{\"version\":\"v2\"}", "file":"index.js"
++        }});
++        let result = run(code.to_vec(), EVENT, Some(snapshot));
++        let FunctionOutcome::Returned(output) = result.outcome else {
++            panic!("expected a successful module invocation");
++        };
++        assert_eq!(
++            ::serde_json::from_str::<Json>(&output).unwrap()["request"]["uri"],
++            "/v2/index.js"
++        );
++        assert_eq!(result.logs, vec!["false"]);
++
++        for source in [
++            "import fs from 'node:fs'; function handler(e) { return e.request; }",
++            "import cf from 'cloudfront'; const kvs = cf.kvs(); function handler(e) { return e.request; }",
++        ] {
++            assert!(matches!(
++                run(source.as_bytes().to_vec(), EVENT, None).outcome,
++                FunctionOutcome::Failed(_)
++            ));
++        }
++    }
++
++    #[test]
++    fn missing_keys_fail_and_regular_handlers_still_run() {
++        let snapshot = ::serde_json::json!({"id":"store-id", "keys":{}});
++        let result = run(
++            br#"import cf from 'cloudfront';
++            async function handler(event) { await cf.kvs().get('missing'); return event.request; }
++        "#
++            .to_vec(),
++            EVENT,
++            Some(snapshot),
++        );
++        assert!(
++            matches!(result.outcome, FunctionOutcome::Failed(message) if message.contains("key not found"))
++        );
++        let result = run(
++            b"function handler(event) { return event.request; }".to_vec(),
++            EVENT,
++            None,
++        );
++        assert!(matches!(result.outcome, FunctionOutcome::Returned(_)));
++    }
++}
